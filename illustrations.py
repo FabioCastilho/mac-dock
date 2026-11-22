@@ -6,6 +6,8 @@ e bg (fundo do esboço).
 """
 import math
 
+from i18n import _
+
 W, H = 240.0, 110.0
 X0, STEP = 50.0, 30.0
 
@@ -35,11 +37,11 @@ def _text(cr, s, x, y, color, size=9, center=False, bold=False, mono=False):
                         0, 1 if bold else 0)
     cr.set_font_size(size)
     if center:
-        ext = cr.text_extents(s)
+        ext = cr.text_extents(_(s))
         x -= ext.width / 2 + ext.x_bearing
     cr.move_to(x, y)
     _rgba(cr, color)
-    cr.show_text(s)
+    cr.show_text(_(s))
 
 
 def _line(cr, color, pts, width=1.5, dash=None):

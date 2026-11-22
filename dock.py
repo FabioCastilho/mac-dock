@@ -112,7 +112,14 @@ DEFAULTS = {
     "theme_light": "claro",
     "theme_dark": "escuro",
     "accent_auto": False,  # usa a cor de destaque do KDE no indicador e na borda
+    "position": "bottom",  # bottom | top | left | right
+    "multi_monitor": False,   # um dock por monitor
+    "window_preview": True,   # miniaturas das janelas ao passar o mouse
+    "smart_hide": False,      # esconde só quando uma janela cobre o dock
+    "language": "auto",       # auto | pt | en | es
 }
+
+POSITIONS = ("bottom", "top", "left", "right")
 
 # modos sugeridos na primeira execução (só entram os apps instalados)
 SEED_MODES = [
@@ -127,6 +134,9 @@ SEED_MODES = [
 
 DEFAULT_LAUNCHER_ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                      "assets", "launcher.png")
+
+
+from i18n import _, set_language  # noqa: E402
 
 
 def desktop_info(desktop_id):
@@ -279,13 +289,23 @@ def kwin_window_cmd(win_id, action):
 
 FEED_JS = r"""
 const SVC="%(svc)s", PATH="%(path)s", IFACE="%(iface)s";
+function onDesktop(w) {
+  if (w.onAllDesktops) return true;
+  const cur = workspace.currentDesktop, ds = w.desktops || [];
+  for (let i = 0; i < ds.length; i++) if (ds[i] === cur || ds[i].id === cur.id) return true;
+  return false;
+}
 function snap() {
   const out = [];
   for (const w of workspace.windowList()) {
     if (!w.normalWindow || w.skipTaskbar) continue;
+    const g = w.frameGeometry;
     out.push({id: String(w.internalId), app: String(w.desktopFileName || ""),
               cls: String(w.resourceClass || ""), title: String(w.caption || ""),
-              active: w === workspace.activeWindow, min: !!w.minimized, pid: w.pid, att: !!w.demandsAttention});
+              active: w === workspace.activeWindow, min: !!w.minimized, pid: w.pid,
+              att: !!w.demandsAttention, out: w.output ? String(w.output.name) : "",
+              geo: [Math.round(g.x), Math.round(g.y), Math.round(g.width), Math.round(g.height)],
+              vis: onDesktop(w) && !w.minimized, fs: !!w.fullScreen});
   }
   callDBus(SVC, PATH, IFACE, "Update", JSON.stringify(out));
 }
@@ -293,11 +313,16 @@ function hook(w) {
   if (w.captionChanged) w.captionChanged.connect(snap);
   if (w.minimizedChanged) w.minimizedChanged.connect(snap);
   if (w.demandsAttentionChanged) w.demandsAttentionChanged.connect(snap);
+  if (w.frameGeometryChanged) w.frameGeometryChanged.connect(function() { if (!w.move && !w.resize) snap(); });
+  if (w.interactiveMoveResizeFinished) w.interactiveMoveResizeFinished.connect(snap);
+  if (w.desktopsChanged) w.desktopsChanged.connect(snap);
+  if (w.outputChanged) w.outputChanged.connect(snap);
 }
 for (const w of workspace.windowList()) hook(w);
 workspace.windowAdded.connect(function(w) { hook(w); snap(); });
 workspace.windowRemoved.connect(snap);
 workspace.windowActivated.connect(snap);
+if (workspace.currentDesktopChanged) workspace.currentDesktopChanged.connect(snap);
 snap();
 """
 
@@ -416,6 +441,22 @@ class Item:
             or win.get("cls", "").lower() in self.match_keys)
 
 
+def windows_cover(windows, output, rect_, margin=2):
+    """Alguma janela visível (na tela `output`, se informada) cobre o retângulo do dock?"""
+    dx, dy, dw, dh = rect_
+    for w in windows:
+        geo = w.get("geo")
+        if not geo or not w.get("vis", True) or w.get("min"):
+            continue
+        if output and w.get("out") and w["out"] != output:
+            continue
+        gx, gy, gw, gh = geo
+        if gx < dx + dw - margin and gx + gw > dx + margin and gy < dy + dh - margin \
+                and gy + gh > dy + margin:
+            return True
+    return False
+
+
 def find_app_info(win):
     """Procura o .desktop de uma janela que não está fixada."""
     app = win.get("app", "").removesuffix(".desktop")
@@ -497,6 +538,12 @@ class DockView(Gtk.Widget):
         self.kde_dark = None         # preferência de cor do KDE (True = escuro)
         self.kde_accent = None
         self.drop_hover = False
+        self.covered = False         # alguma janela cobre o dock (esconder inteligente)
+        self.monitor_name = None     # multi-monitor: só mostra as janelas desta tela
+        self.preview = None          # WindowPreview (miniaturas), criado no 1º uso
+        self._pv_key = None
+        self._pv_since = 0.0
+        self._pv_leave = None
         self._last_region = None
         self._last_frame = None
         self.on_settings = self.on_launcher = self.on_pinned = None
@@ -536,6 +583,7 @@ class DockView(Gtk.Widget):
         self.add_tick_callback(self._tick)
         GLib.timeout_add(1500, self._poll_running)
         GLib.timeout_add(5000, self._poll_trash)
+        GLib.timeout_add(300, lambda: (self._update_covered(), True)[1])
         self._poll_trash()
 
     # ---------- itens ----------
@@ -555,7 +603,8 @@ class DockView(Gtk.Widget):
 
         new = []
         if c["show_launcher"]:
-            new.append(get("launcher", "launcher", name="Aplicativos"))
+            new.append(get("launcher", "launcher", name=_("Aplicativos")))
+            new[-1].name = _("Aplicativos")
         pinned_items = []
         for did in c["pinned"]:
             info = desktop_info(did)
@@ -568,7 +617,7 @@ class DockView(Gtk.Widget):
         new += pinned_items
 
         extra = {}
-        for win in self.windows:
+        for win in self._my_windows():
             for it in pinned_items:
                 if it.matches(win):
                     it.windows.append(win)
@@ -593,7 +642,8 @@ class DockView(Gtk.Widget):
             new += running
         if c["show_trash"]:
             new.append(get("sep", "sep2"))
-            new.append(get("trash", "trash", name="Lixeira"))
+            new.append(get("trash", "trash", name=_("Lixeira")))
+            new[-1].name = _("Lixeira")
         for it in new:
             if it.windows and it.bounce_start:
                 it.bounce_start = None
@@ -603,6 +653,11 @@ class DockView(Gtk.Widget):
         self._last_region = None
         self.apply_badges()
         self.fit_size()
+
+    def _my_windows(self):
+        if not self.monitor_name:
+            return self.windows
+        return [w for w in self.windows if w.get("out") in ("", None, self.monitor_name)]
 
     def fit_size(self):
         """Mantém view, espaçador e janela do tamanho calculado (a largura muda
@@ -645,6 +700,77 @@ class DockView(Gtk.Widget):
                         break
                 it.badge = max(it.badge, min(it.count, 99))
 
+    def dock_global_rect(self):
+        """(conector do monitor, retângulo do dock na tela em coordenadas globais) ou None."""
+        native = self.get_native()
+        surface = native.get_surface() if native else None
+        if surface is None:
+            return None
+        mon = self.get_display().get_monitor_at_surface(surface)
+        if mon is None:
+            return None
+        g = mon.get_geometry()
+        ww, wh = self.window_size()
+        pos = self.position
+        ox = g.x + (g.width - ww) / 2 if pos in ("bottom", "top") else (
+            g.x if pos == "left" else g.x + g.width - ww)
+        oy = g.y + (g.height - wh) / 2 if pos in ("left", "right") else (
+            g.y if pos == "top" else g.y + g.height - wh)
+        c = self.cfg
+        lw, lh = self.logical_size()
+        pill_w = self._rest_total() + 2 * c["padding"]
+        pill_h = c["icon_size"] + 2 * c["padding"] + c["margin_bottom"]
+        sx, sy, sw, sh = self.screen_rect((lw - pill_w) / 2, lh - pill_h, pill_w, pill_h)
+        return mon.get_connector() or "", (ox + sx, oy + sy, sw, sh)
+
+    # ---------- pré-visualização de janelas ----------
+    def _close_preview(self):
+        if self.preview is not None and self.preview.is_open:
+            self.preview.close()
+        self._pv_key = self._pv_leave = None
+
+    def _preview_tick(self, now):
+        c = self.cfg
+        it = self.items[self.hover] if 0 <= self.hover < len(self.items) else None
+        want = bool(c["window_preview"] and it is not None and it.kind == "app" and it.windows
+                    and self.act > 0.5 and not self.menu_open and not self.drag
+                    and not self.drop_hover)
+        key = id(it) if want else None
+        if key != self._pv_key:
+            self._pv_key, self._pv_since = key, now
+        pv = self.preview
+        if want:
+            self._pv_leave = None
+            if now - self._pv_since > 0.45 and (pv is None or pv.item is not it):
+                if pv is None:
+                    from previews import WindowPreview
+                    pv = self.preview = WindowPreview(
+                        self, lambda wid: kwin_window_cmd(wid, "focus"))
+                H = self.logical_size()[1]
+                c_ = self.cfg
+                ax, ay = self.to_screen(it.x + it.w / 2,
+                                        H - c_["margin_bottom"] - c_["padding"] - it.w - 8)
+                pv.open(it, (ax, ay), self.position)
+        elif pv is not None and pv.is_open and not pv.inside:
+            if self._pv_leave is None:
+                self._pv_leave = now
+            elif now - self._pv_leave > 0.35:
+                pv.close()
+                self._pv_leave = None
+        elif pv is not None and pv.is_open:
+            self._pv_leave = None
+
+    def _update_covered(self):
+        """True se uma janela visível, nesta tela, encosta na área do dock."""
+        if not self.cfg["smart_hide"]:
+            self.covered = False
+            return
+        info = self.dock_global_rect()
+        if info is None:
+            return
+        out, (dx, dy, dw, dh) = info
+        self.covered = windows_cover(self.windows, out, (dx, dy, dw, dh))
+
     def set_entry(self, key, props):
         """Atualização do protocolo com.canonical.Unity.LauncherEntry (progresso e contador)."""
         st = {}
@@ -668,6 +794,7 @@ class DockView(Gtk.Widget):
     def set_windows(self, wins):
         self.windows = wins
         self.feed_ok = True
+        self._update_covered()
         if not self.drag:
             self.sync_items()
             self.queue_resize()
@@ -760,7 +887,8 @@ class DockView(Gtk.Widget):
         n = len(self.items)
         return sum(self.rest_w(it) for it in self.items) + max(n - 1, 0) * self.cfg["gap"]
 
-    def window_size(self):
+    def logical_size(self):
+        """Tamanho no sistema de coordenadas "lógico": dock horizontal, na borda de baixo."""
         c = self.cfg
         base, M = c["icon_size"], c["max_scale"]
         extra = base * (M - 1) * 2.6
@@ -768,8 +896,71 @@ class DockView(Gtk.Widget):
         h = base * M * 1.12 + 2 * c["padding"] + 60 + c["margin_bottom"]
         return int(w), int(h)
 
+    @property
+    def position(self):
+        pos = self.cfg.get("position", "bottom")
+        return pos if pos in POSITIONS else "bottom"
+
+    @property
+    def vertical(self):
+        return self.position in ("left", "right")
+
+    def window_size(self):
+        """Tamanho real da janela (troca largura e altura nos docks laterais)."""
+        w, h = self.logical_size()
+        return (h, w) if self.vertical else (w, h)
+
+    def _xf(self):
+        """Matriz (a, b, c, d, e, f) lógico -> tela: sx = a*x + c*y + e, sy = b*x + d*y + f."""
+        _, lh = self.logical_size()
+        return {"bottom": (1, 0, 0, 1, 0, 0),
+                "top": (1, 0, 0, -1, 0, lh),
+                "left": (0, 1, -1, 0, lh, 0),
+                "right": (0, 1, 1, 0, 0, 0)}[self.position]
+
+    def to_screen(self, x, y):
+        a, b, c, d, e, f = self._xf()
+        return a * x + c * y + e, b * x + d * y + f
+
+    def to_logical(self, sx, sy):
+        a, b, c, d, e, f = self._xf()
+        det = a * d - b * c
+        sx, sy = sx - e, sy - f
+        return (d * sx - c * sy) / det, (-b * sx + a * sy) / det
+
+    def lin_to_logical(self, dx, dy):
+        """Vetor (sem translação) da tela para o sistema lógico."""
+        a, b, c, d, _e, _f = self._xf()
+        det = a * d - b * c
+        return (d * dx - c * dy) / det, (-b * dx + a * dy) / det
+
+    def screen_rect(self, x, y, w, h):
+        """Retângulo lógico -> retângulo envolvente na tela (x, y, w, h)."""
+        pts = [self.to_screen(px, py) for px, py in ((x, y), (x + w, y), (x, y + h), (x + w, y + h))]
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        return min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
+
+    def _matrix(self, linear_only=False, inverse=False):
+        a, b, c, d, e, f = self._xf()
+        if inverse:
+            det = a * d - b * c
+            a, b, c, d = d / det, -b / det, -c / det, a / det
+        if linear_only or inverse:
+            e = f = 0
+        m = Graphene.Matrix()
+        m.init_from_2d(a, b, c, d, e, f)
+        return m
+
+    def _upright(self, snapshot, cx, cy):
+        """Desfaz a rotação do dock ao redor de (cx, cy): ícones e textos ficam de pé."""
+        if self.position == "bottom":
+            return
+        snapshot.translate(Graphene.Point().init(cx, cy))
+        snapshot.transform_matrix(self._matrix(inverse=True))
+        snapshot.translate(Graphene.Point().init(-cx, -cy))
+
     def _rest_centers(self):
-        W, _ = self.window_size()
+        W, _ = self.logical_size()
         x = (W - self._rest_total()) / 2
         out = []
         for it in self.items:
@@ -780,7 +971,7 @@ class DockView(Gtk.Widget):
 
     def _layout(self):
         """Posiciona os itens a partir das escalas atuais; devolve a largura total."""
-        W, _ = self.window_size()
+        W, _ = self.logical_size()
         for it in self.items:
             it.w = self.rest_w(it) * (1.0 if it.kind == "sep" else it.scale)
         total = sum(it.w for it in self.items) + max(len(self.items) - 1, 0) * self.cfg["gap"]
@@ -797,7 +988,8 @@ class DockView(Gtk.Widget):
         return -1
 
     # ---------- mouse ----------
-    def _on_motion(self, _c, x, _y):
+    def _on_motion(self, _c, x, y):
+        x, _ly = self.to_logical(x, y)
         if self.mouse_x is None:
             self.smooth_x = x
         self.mouse_x = x
@@ -807,6 +999,8 @@ class DockView(Gtk.Widget):
             self.mouse_x = None
 
     def _drag_begin(self, _g, x, y):
+        self._close_preview()
+        x, y = self.to_logical(x, y)
         i = self._hit(x)
         self.press = {"idx": i, "x": x, "y": y} if i >= 0 else None
         self.drag = None
@@ -814,6 +1008,7 @@ class DockView(Gtk.Widget):
     def _drag_update(self, _g, dx, dy):
         if not self.press:
             return
+        dx, dy = self.lin_to_logical(dx, dy)
         it = self.items[self.press["idx"]]
         if self.drag is None:
             if not (it.kind == "app" and it.pinned) or math.hypot(dx, dy) < 10:
@@ -945,7 +1140,8 @@ class DockView(Gtk.Widget):
             return it
         return None
 
-    def _drop_motion(self, _t, x, _y):
+    def _drop_motion(self, _t, x, y):
+        x, _ly = self.to_logical(x, y)
         if not self.cfg["file_drop"]:
             return 0
         self.mouse_x = x
@@ -956,7 +1152,8 @@ class DockView(Gtk.Widget):
         self.drop_hover = False
         self.mouse_x = None
 
-    def _drop_files(self, _t, value, x, _y):
+    def _drop_files(self, _t, value, x, y):
+        x, _ly = self.to_logical(x, y)
         self.drop_hover = False
         it = self._drop_target(x)
         files = value.get_files() if value else []
@@ -979,7 +1176,9 @@ class DockView(Gtk.Widget):
         return True
 
     # ---------- menu do botão direito ----------
-    def _on_right(self, _g, _n, x, _y):
+    def _on_right(self, _g, _n, x, y):
+        self._close_preview()
+        x, _ly = self.to_logical(x, y)
         i = self._hit(x)
         it = self.items[i] if i >= 0 and self.items[i].kind != "sep" else None
         group = Gio.SimpleActionGroup()
@@ -997,7 +1196,7 @@ class DockView(Gtk.Widget):
         if it and it.kind == "app":
             actions = Gio.Menu()
             if it.info:
-                add(actions, "Abrir nova janela" if it.windows else "Abrir", lambda: self.launch(it))
+                add(actions, _("Abrir nova janela") if it.windows else _("Abrir"), lambda: self.launch(it))
                 for a in it.info.list_actions():
                     add(actions, it.info.get_action_name(a), lambda a=a: self.launch(it, a))
             if actions.get_n_items():
@@ -1007,47 +1206,49 @@ class DockView(Gtk.Widget):
                 for w in it.windows[:8]:
                     add(wsec, (w.get("title") or it.name)[:48],
                         lambda w=w: kwin_window_cmd(w["id"], "focus"))
-                menu.append_section("Janelas", wsec)
+                menu.append_section(_("Janelas"), wsec)
                 csec = Gio.Menu()
-                add(csec, "Fechar todas as janelas",
+                add(csec, _("Fechar todas as janelas"),
                     lambda: [kwin_window_cmd(w["id"], "close") for w in it.windows])
                 menu.append_section(None, csec)
             if self.cfg["big_menu"] and it.windows:
                 msec = Gio.Menu()
-                add(msec, "Minimizar todas as janelas",
+                add(msec, _("Minimizar todas as janelas"),
                     lambda: [kwin_window_cmd(w["id"], "minimize") for w in it.windows])
                 menu.append_section(None, msec)
             psec = Gio.Menu()
             if self.cfg["big_menu"] and it.pinned and len(self.cfg["pinned"]) > 1:
-                add(psec, "Mover para o começo", lambda: self._move_pinned(it, 0))
-                add(psec, "Mover para o fim", lambda: self._move_pinned(it, -1))
+                add(psec, _("Mover para o começo"), lambda: self._move_pinned(it, 0))
+                add(psec, _("Mover para o fim"), lambda: self._move_pinned(it, -1))
             if it.pinned:
-                add(psec, "Remover do dock", lambda: self._unpin(it))
+                add(psec, _("Remover do dock"), lambda: self._unpin(it))
             elif it.info:
-                add(psec, "Manter no dock", lambda: self._pin(it))
+                add(psec, _("Manter no dock"), lambda: self._pin(it))
             menu.append_section(None, psec)
         elif it and it.kind == "trash":
             tsec = Gio.Menu()
-            add(tsec, "Abrir lixeira", self._open_trash)
-            add(tsec, "Esvaziar lixeira", lambda: subprocess.Popen(["gio", "trash", "--empty"]))
+            add(tsec, _("Abrir lixeira"), self._open_trash)
+            add(tsec, _("Esvaziar lixeira"), lambda: subprocess.Popen(["gio", "trash", "--empty"]))
             menu.append_section(None, tsec)
         if self.on_mode_menu:
             self.on_mode_menu(menu, add)
         ssec = Gio.Menu()
-        add(ssec, "Ajustes do dock…", lambda: self.on_settings and self.on_settings())
+        add(ssec, _("Ajustes do dock…"), lambda: self.on_settings and self.on_settings())
         menu.append_section(None, ssec)
 
         pop = Gtk.PopoverMenu.new_from_model(menu)
         self.insert_action_group("dock", group)
         pop.set_parent(self)
-        pop.set_position(Gtk.PositionType.TOP)
+        pop.set_position({"bottom": Gtk.PositionType.TOP, "top": Gtk.PositionType.BOTTOM,
+                          "left": Gtk.PositionType.RIGHT, "right": Gtk.PositionType.LEFT}[self.position])
         pop.set_has_arrow(False)
-        H = self.get_height() or self.window_size()[1]
+        H = self.logical_size()[1]
         c = self.cfg
         cx = (it.x + it.w / 2) if it else x
         target = Gdk.Rectangle()          # (os argumentos do construtor são ignorados)
-        target.x = int(cx)
-        target.y = int(H - c["margin_bottom"] - c["icon_size"] - 2 * c["padding"] - 6)
+        tx, ty = self.to_screen(cx, H - c["margin_bottom"] - c["icon_size"] - 2 * c["padding"] - 6)
+        target.x = int(tx)
+        target.y = int(ty)
         target.width = target.height = 1
         pop.set_pointing_to(target)
         self.menu_open = True
@@ -1083,7 +1284,8 @@ class DockView(Gtk.Widget):
         active = self.mouse_x is not None or self.menu_open or self.drag is not None
         if active:
             self.last_active = now
-        hide = c["autohide"] and not active and now - self.last_active > 0.6
+        want = self.covered if c["smart_hide"] else c["autohide"]
+        hide = want and not active and now - self.last_active > 0.6
         goal = 1.0 if hide else 0.0
         self.hide_t += (goal - self.hide_t) * 0.18
         if abs(goal - self.hide_t) < 0.003:
@@ -1110,6 +1312,7 @@ class DockView(Gtk.Widget):
         self._ensure_colors()
         self._update_input_region()
         self._update_glass()
+        self._preview_tick(now)
         self.queue_draw()
         return GLib.SOURCE_CONTINUE
 
@@ -1141,14 +1344,14 @@ class DockView(Gtk.Widget):
         if surface is None:
             return
         c = self.cfg
-        W, H = self.window_size()
+        W, H = self.logical_size()
         total = self._layout()
         pill_h = c["icon_size"] + 2 * c["padding"] + c["margin_bottom"]
         hovering = self.act > 0.01 or self.drag is not None
         rest = self._rest_total()
         if self.drag:                       # arrastando: região grande, para puxar p/ cima
             x0, w, h = 0, W, H
-        elif c["autohide"] and self.hide_t > 0.5 and not hovering:
+        elif (c["autohide"] or c["smart_hide"]) and self.hide_t > 0.5 and not hovering:
             x0, w, h = int((W - rest) / 2 - c["padding"] - 60), int(rest + 2 * c["padding"] + 120), 3
         elif hovering or self.menu_open:
             x0, w = int((W - total) / 2 - 20), int(total + 40)
@@ -1161,7 +1364,9 @@ class DockView(Gtk.Widget):
         if key == self._last_region:
             return
         self._last_region = key
-        surface.set_input_region(cairo.Region(cairo.RectangleInt(x0, H - h, w, h)))
+        sx, sy, sw, sh = self.screen_rect(x0, H - h, w, h)
+        surface.set_input_region(cairo.Region(cairo.RectangleInt(
+            int(round(sx)), int(round(sy)), int(round(sw)), int(round(sh)))))
 
     def _update_glass(self):
         """A caixa 'glass' acompanha o dock; o GTK pede o blur ao KWin por ela (CSS)."""
@@ -1172,7 +1377,7 @@ class DockView(Gtk.Widget):
         w = int(round(total + 2 * c["padding"]))
         h = int(c["icon_size"] + 2 * c["padding"])
         off = int(round(self.hide_t * (h + c["margin_bottom"] + 6)))
-        key = (w, h, c["radius"], bool(c["blur"]), off)
+        key = (w, h, c["radius"], bool(c["blur"]), off, self.position)
         if key == self._glass_key:
             return
         if not self._glass_key or self._glass_key[2] != c["radius"]:
@@ -1180,20 +1385,25 @@ class DockView(Gtk.Widget):
                 ".glass { background: rgba(0,0,0,0.01); border-radius: %dpx; "
                 "backdrop-filter: blur(24px); }" % c["radius"])
         self._glass_key = key
-        self.glass.set_size_request(w, h)
-        self.glass.set_margin_top(self.window_size()[1] - c["margin_bottom"] - h + off)
+        lw, lh = self.logical_size()
+        sx, sy, sw, sh = self.screen_rect((lw - w) / 2, lh - c["margin_bottom"] - h + off, w, h)
+        self.glass.set_size_request(int(round(sw)), int(round(sh)))
+        self.glass.set_margin_start(int(round(sx)))
+        self.glass.set_margin_top(int(round(sy)))
         self.glass.set_visible(bool(c["blur"]) and self.hide_t < 0.97)
 
     # ---------- desenho ----------
     def do_snapshot(self, snapshot):
         c = self.cfg
-        W, H = self.window_size()
+        W, H = self.logical_size()
         total = self._layout()
         pad, base, mb = c["padding"], c["icon_size"], c["margin_bottom"]
         pill_w, pill_h = total + 2 * pad, base + 2 * pad
         px, py = (W - pill_w) / 2, H - mb - pill_h
         th = self.theme()
         snapshot.save()
+        if self.position != "bottom":
+            snapshot.transform_matrix(self._matrix())
         snapshot.translate(Graphene.Point().init(0, self.hide_t * (pill_h + mb + 6)))
 
         bgr, bgg, bgb, bga = th["bg"]
@@ -1223,6 +1433,8 @@ class DockView(Gtk.Widget):
             if it is dragged:
                 x = self.drag["x"] - self.drag["grab"]
                 y = self.drag["y"] - size / 2 - 6
+            snapshot.save()
+            self._upright(snapshot, x + size / 2, y + size / 2)
             self._draw_glow(snapshot, it, x, base_y, size)
             snapshot.push_opacity(0.55 if it is dragged and self.drag["remove"] else 1.0)
             if it.kind == "launcher" and it.paintable is None:
@@ -1233,19 +1445,20 @@ class DockView(Gtk.Widget):
                 it.paintable.snapshot(snapshot, size, size)
                 snapshot.restore()
             snapshot.pop()
-            if c["reflection"] and it.paintable and it is not dragged:
-                self._draw_reflection(snapshot, it, x, base_y, size, pad + mb)
-            if it.running and c["show_dots"] and it.kind == "app" and it is not dragged:
-                self._draw_dots(snapshot, it, x, size, H - mb - 8, th, now)
             if it.progress is not None and it is not dragged:
                 self._draw_progress(snapshot, x, y, size, it.progress)
             if it.music and it is not dragged:
                 self._draw_equalizer(snapshot, x, y, size, now)
             if it.badge:
                 self._draw_badge(snapshot, x + size - 6, y + 2, it.badge)
+            snapshot.restore()
+            if c["reflection"] and it.paintable and it is not dragged and not self.vertical:
+                self._draw_reflection(snapshot, it, x, base_y, size, pad - 2)
+            if it.running and c["show_dots"] and it.kind == "app" and it is not dragged:
+                self._draw_dots(snapshot, it, x, size, H - mb - 8, th, now)
 
         if self.drag and self.drag["remove"]:
-            self._draw_label(snapshot, self.drag["x"], self.drag["y"] - base - 14, "Remover do dock", th)
+            self._draw_label(snapshot, self.drag["x"], self.drag["y"] - base - 14, _("Remover do dock"), th)
         elif c["show_labels"] and self.hover >= 0 and self.act > 0.3 and not self.drag:
             it = self.items[self.hover]
             if it.kind != "sep":
@@ -1279,6 +1492,7 @@ class DockView(Gtk.Widget):
         snapshot.pop()
 
     def _draw_reflection(self, snapshot, it, x, base_y, size, room):
+        """Reflexo na folga entre o ícone e a borda do dock (nunca sai do contorno)."""
         rh = min(size * 0.40, room)
         if rh < 4:
             return
@@ -1291,8 +1505,9 @@ class DockView(Gtk.Widget):
         snapshot.pop()
         snapshot.save()
         snapshot.translate(Graphene.Point().init(x, base_y + 1))
-        snapshot.scale(1, -1)
-        snapshot.translate(Graphene.Point().init(0, -size))
+        if self.position == "bottom":     # no dock de cima a própria transformação já espelha
+            snapshot.scale(1, -1)
+            snapshot.translate(Graphene.Point().init(0, -size))
         it.paintable.snapshot(snapshot, size, size)
         snapshot.restore()
         snapshot.pop()   # máscara
@@ -1348,7 +1563,11 @@ class DockView(Gtk.Widget):
         layout.set_font_description(Pango.FontDescription("Noto Sans 11"))
         text_w, text_h = layout.get_pixel_size()
         lw, lh = text_w + 22, text_h + 12
-        lx, ly = cx - lw / 2, bottom - lh
+        # nos docks laterais o rótulo fica ao lado do ícone: a largura é que afasta
+        span = lw if self.vertical else lh
+        lx, ly = cx - lw / 2, bottom - lh / 2 - span / 2
+        snapshot.save()
+        self._upright(snapshot, cx, ly + lh / 2)
         lr = Gsk.RoundedRect()
         lr.init_from_rect(rect(lx, ly, lw, lh), lh / 2)
         snapshot.push_rounded_clip(lr)
@@ -1357,6 +1576,7 @@ class DockView(Gtk.Widget):
         snapshot.save()
         snapshot.translate(Graphene.Point().init(lx + 11, ly + 6))
         snapshot.append_layout(layout, rgba(*th["label_fg"]))
+        snapshot.restore()
         snapshot.restore()
 
     def _draw_launcher_icon(self, snapshot, x, y, size):
@@ -1398,25 +1618,31 @@ def find_monitor(connector):
     return None
 
 
-def place_window(win, cfg):
+def place_window(win, cfg, monitor=None):
     """Posição no layer-shell: borda, espaço reservado e monitor."""
-    LayerShell.set_margin(win, LayerShell.Edge.BOTTOM, 0)   # a margem é desenhada por dentro
+    pos = cfg.get("position", "bottom")
+    for name, edge in (("bottom", LayerShell.Edge.BOTTOM), ("top", LayerShell.Edge.TOP),
+                       ("left", LayerShell.Edge.LEFT), ("right", LayerShell.Edge.RIGHT)):
+        LayerShell.set_anchor(win, edge, name == pos)      # só a borda do dock
+        LayerShell.set_margin(win, edge, 0)                # a margem é desenhada por dentro
     zone = cfg["icon_size"] + 2 * cfg["padding"] + cfg["margin_bottom"]
     LayerShell.set_exclusive_zone(
-        win, zone if cfg["reserve_space"] and not cfg["autohide"] else 0)
-    LayerShell.set_monitor(win, find_monitor(cfg.get("monitor")))
+        win, zone if cfg["reserve_space"] and not (cfg["autohide"] or cfg["smart_hide"]) else 0)
+    LayerShell.set_monitor(win, monitor or find_monitor(cfg.get("monitor")))
 
 
-def make_window(app, cfg, layer=True):
+def make_window(app, cfg, layer=True, monitor=None):
     win = Gtk.ApplicationWindow(application=app)
     win.add_css_class("mac-dock")
     win.set_decorated(False)
     view = DockView(cfg)
+    if monitor is not None:
+        view.monitor_name = monitor.get_connector()
     overlay = Gtk.Overlay()
     view.spacer = Gtk.Box()
     view.spacer.set_size_request(*view.window_size())
     overlay.set_child(view.spacer)
-    view.glass = Gtk.Box(halign=Gtk.Align.CENTER, valign=Gtk.Align.START)
+    view.glass = Gtk.Box(halign=Gtk.Align.START, valign=Gtk.Align.START)
     view.glass.add_css_class("glass")
     overlay.add_overlay(view.glass)
     overlay.add_overlay(view)
@@ -1429,9 +1655,8 @@ def make_window(app, cfg, layer=True):
         LayerShell.init_for_window(win)
         LayerShell.set_namespace(win, "mac-dock")
         LayerShell.set_layer(win, LayerShell.Layer.TOP)
-        LayerShell.set_anchor(win, LayerShell.Edge.BOTTOM, True)
         LayerShell.set_keyboard_mode(win, LayerShell.KeyboardMode.NONE)
-        place_window(win, cfg)
+        place_window(win, cfg, monitor)
     return win, view
 
 
@@ -1441,48 +1666,106 @@ class DockApp(Adw.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID)
         self.cfg = load_config()
-        self.win = self.view = self.settings_win = self.launcher_win = None
+        set_language(self.cfg["language"])
+        self.docks = []              # [(janela, view, monitor ou None)]; um por monitor no modo multi
+        self.settings_win = self.launcher_win = None
         self.feed = None
         self.notify_watcher = self.mpris = self.entries = self.appearance = None
+        self.entry_state = {}        # último progresso/contador por app (reaplicado ao recriar docks)
+        self.kde_state = (None, None)
+        self._rebuild_id = 0
         self._save_id = 0
         self._auto_from = None       # modo anterior, quando a troca foi automática
         self._trig_keys = {}
         self.connect("activate", self._on_activate)
         self.connect("shutdown", self._on_shutdown)
 
-    def _wire(self):
-        v = self.view
+    @property
+    def win(self):
+        return self.docks[0][0] if self.docks else None
+
+    @property
+    def view(self):
+        return self.docks[0][1] if self.docks else None
+
+    def _each(self, fn):
+        for _w, v, _m in list(self.docks):
+            fn(v)
+
+    def _layer(self):
+        return bool(LayerShell and LayerShell.is_supported())
+
+    def _wire(self, win, v):
         v.on_settings = self.open_settings
         v.on_launcher = self.toggle_launcher
         v.on_pinned = lambda lst: self.change(pinned=lst)
         v.on_mode_menu = self._mode_menu
-        v.on_resized = lambda w, h: self.win and self.win.set_default_size(w, h)
+        v.on_resized = lambda w, h: win.set_default_size(w, h)
+        for key, props in self.entry_state.items():
+            v.set_entry(key, props)
+        v.set_kde(*self.kde_state)
+        if self.mpris:
+            v.set_playing(self.mpris._last or frozenset())
         if DockApp.windows:
             v.set_windows(DockApp.windows)
 
+    def _monitors(self):
+        mons = Gdk.Display.get_default().get_monitors()
+        return [mons.get_item(i) for i in range(mons.get_n_items())]
+
+    def _build_docks(self):
+        """(Re)cria as janelas do dock: uma, ou uma por monitor no modo multi-monitor."""
+        old, self.docks = self.docks, []
+        targets = [None]
+        if self._layer() and self.cfg["multi_monitor"]:
+            targets = self._monitors() or [None]
+        for mon in targets:
+            win, view = make_window(self, self.cfg, monitor=mon)
+            self.docks.append((win, view, mon))
+            self._wire(win, view)
+            win.present()
+        for win, _v, _m in old:
+            win.close()
+
+    def _monitors_changed(self, *_a):
+        if not self.cfg["multi_monitor"]:
+            return
+        if self._rebuild_id:
+            GLib.source_remove(self._rebuild_id)
+        self._rebuild_id = GLib.timeout_add(600, self._rebuild_later)
+
+    def _rebuild_later(self):
+        self._rebuild_id = 0
+        self._build_docks()
+        return False
+
     def _on_activate(self, _app):
-        if self.win is not None:           # 2ª execução: abre os ajustes
+        if self.docks:                     # 2ª execução: abre os ajustes
             self.open_settings()
             return
-        self.win, self.view = make_window(self, self.cfg)
         self.feed = KWinFeed(self, self._on_windows)
-        self._wire()
-        self.win.present()
+        self._build_docks()
         self.feed.start()
-        from watchers import MprisWatcher, NotifyWatcher
+        Gdk.Display.get_default().get_monitors().connect("items-changed", self._monitors_changed)
+        from watchers import (AppearanceWatcher, LauncherEntryWatcher, MprisWatcher,
+                              NotifyWatcher)
         self.notify_watcher = NotifyWatcher(
-            lambda app, entry, rid: self.view and self.view.notify(app, entry, rid))
-        self.mpris = MprisWatcher(lambda keys: self.view and self.view.set_playing(keys))
-        from watchers import AppearanceWatcher, LauncherEntryWatcher
-        self.entries = LauncherEntryWatcher(
-            lambda key, props: self.view and self.view.set_entry(key, props))
-        self.appearance = AppearanceWatcher(
-            lambda dark, accent: self.view and self.view.set_kde(dark, accent))
+            lambda app, entry, rid: self._each(lambda v: v.notify(app, entry, rid)))
+        self.mpris = MprisWatcher(lambda keys: self._each(lambda v: v.set_playing(keys)))
+        self.entries = LauncherEntryWatcher(self._on_entry)
+        self.appearance = AppearanceWatcher(self._on_appearance)
+
+    def _on_entry(self, key, props):
+        self.entry_state[key] = props
+        self._each(lambda v: v.set_entry(key, props))
+
+    def _on_appearance(self, dark, accent):
+        self.kde_state = (dark, accent)
+        self._each(lambda v: v.set_kde(dark, accent))
 
     def _on_windows(self, wins):
         DockApp.windows = wins
-        if self.view:
-            self.view.set_windows(wins)
+        self._each(lambda v: v.set_windows(wins))
         self._auto_mode(wins)
 
     # ---------- modos ----------
@@ -1498,7 +1781,7 @@ class DockApp(Adw.Application):
         if not auto:
             self._auto_from = None
         self.change(mode=name, pinned=list(self.mode_entry(name)["pinned"]))
-        self.view.pop_in()
+        self._each(lambda v: v.pop_in())
         if self.settings_win is not None:
             self.settings_win.refresh_modes()
 
@@ -1510,7 +1793,7 @@ class DockApp(Adw.Application):
         for m in modes:
             mark = "✓  " if m["name"] == self.cfg["mode"] else "     "
             add(sub, mark + m["name"], lambda n=m["name"]: self.set_mode(n))
-        menu.append_submenu("Modo: " + self.cfg["mode"], sub)
+        menu.append_submenu(_("Modo: ") + self.cfg["mode"], sub)
 
     def _trigger_match(self, triggers, win):
         names = {win.get("app", "").removesuffix(".desktop").lower(), win.get("cls", "").lower()}
@@ -1549,13 +1832,13 @@ class DockApp(Adw.Application):
                 return
 
     def drag_busy(self):
-        return bool(self.view and self.view.drag)
+        return any(v.drag for _w, v, _m in self.docks)
 
     def reset_config(self):
         new = ensure_modes(copy.deepcopy(DEFAULTS))
         self._auto_from = None
         self.change(**new)
-        self.view.pop_in()
+        self._each(lambda v: v.pop_in())
 
     def _on_shutdown(self, _app):
         if self.feed:
@@ -1581,38 +1864,39 @@ class DockApp(Adw.Application):
             self.settings_win.connect("close-request", self._settings_closed)
         self.settings_win.present()
 
+    def reopen_settings(self):
+        """Reabre a janela de ajustes (para aplicar o idioma novo)."""
+        if self.settings_win is not None:
+            self.settings_win.close()
+        GLib.idle_add(lambda: (self.open_settings(), False)[1])
+
     def _settings_closed(self, _w):
         self.settings_win = None
         return False
 
     def change(self, **kw):
         """Muda opções, aplica ao vivo e salva (com pequena espera)."""
-        old_monitor = self.cfg.get("monitor")
+        def layout_key():
+            return (self.cfg.get("monitor"), self.cfg.get("position"), self.cfg.get("multi_monitor"))
+        before = layout_key()
         if "pinned" in kw and "mode" not in kw:       # editar os fixados edita o modo ativo
             self.mode_entry()["pinned"] = list(kw["pinned"])
         self.cfg.update(kw)
+        if "language" in kw:
+            set_language(self.cfg["language"])
         self._trig_keys.clear()
-        self.view.apply_config(self.cfg)
-        w, h = self.view.window_size()
-        self.win.set_default_size(w, h)
-        if LayerShell and LayerShell.is_supported():
-            if self.cfg.get("monitor") != old_monitor:
-                self._recreate_window()
+        for win, view, mon in self.docks:
+            view.apply_config(self.cfg)
+            win.set_default_size(*view.window_size())
+        if self._layer():
+            if layout_key() != before:
+                self._build_docks()
             else:
-                place_window(self.win, self.cfg)
+                for win, _v, mon in self.docks:
+                    place_window(win, self.cfg, mon)
         if self._save_id:
             GLib.source_remove(self._save_id)
         self._save_id = GLib.timeout_add(400, self._save)
-
-    def _recreate_window(self):
-        """Trocar de monitor: cria a janela nova na tela certa e fecha a antiga."""
-        old = self.win
-        self.win, self.view = make_window(self, self.cfg)
-        self._wire()
-        if self.mpris:
-            self.view.set_playing(self.mpris._last or frozenset())
-        self.win.present()
-        old.close()
 
     def _save(self):
         self._save_id = 0

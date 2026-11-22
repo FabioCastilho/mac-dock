@@ -6,6 +6,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from dock import LayerShell, find_monitor  # noqa: E402
+from i18n import _  # noqa: E402
 
 CSS = b"""
 window.launcher { background: rgba(8, 9, 14, 0.50); backdrop-filter: blur(30px); }
@@ -62,7 +63,7 @@ class LauncherWindow(Gtk.Window):
         root.set_margin_end(120)
         self.set_child(root)
 
-        self.search = Gtk.SearchEntry(placeholder_text="Buscar", halign=Gtk.Align.CENTER)
+        self.search = Gtk.SearchEntry(placeholder_text=_("Buscar"), halign=Gtk.Align.CENTER)
         self.search.add_css_class("launcher-search")
         self.search.set_size_request(380, -1)
         self.search.connect("search-changed", lambda _e: self.flow.invalidate_filter())

@@ -6,6 +6,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, Gtk  # noqa: E402
 
 from dock import DEFAULTS, THEMES, desktop_info  # noqa: E402
+from i18n import LANG_NAMES, LANGS, _, translate_tree  # noqa: E402
 from illustrations import make_area  # noqa: E402
 
 
@@ -42,9 +43,9 @@ def _installed_apps():
 class AppListEditor:
     """Lista editável de apps (.desktop) dentro de um Adw.PreferencesGroup."""
 
-    def __init__(self, group, get_list, set_list, reorder=True, add_title="Adicionar app"):
+    def __init__(self, group, get_list, set_list, reorder=True, add_title=None):
         self.group, self.get_list, self.set_list = group, get_list, set_list
-        self.reorder, self.add_title = reorder, add_title
+        self.reorder, self.add_title = reorder, add_title or _("Adicionar app")
         self._rows = []
         self._avail = []
         self.rebuild()
@@ -57,21 +58,21 @@ class AppListEditor:
         for i, did in enumerate(lst):
             info = desktop_info(did)
             row = Adw.ActionRow(title=info.get_display_name() if info else did,
-                                subtitle="" if info else "não encontrado")
+                                subtitle="" if info else _("não encontrado"))
             if info and info.get_icon():
                 img = Gtk.Image.new_from_gicon(info.get_icon())
                 img.set_pixel_size(32)
                 row.add_prefix(img)
             if self.reorder:
-                for icon, delta, tip in (("go-up-symbolic", -1, "Subir"),
-                                         ("go-down-symbolic", 1, "Descer")):
+                for icon, delta, tip in (("go-up-symbolic", -1, _("Subir")),
+                                         ("go-down-symbolic", 1, _("Descer"))):
                     b = Gtk.Button(icon_name=icon, valign=Gtk.Align.CENTER, tooltip_text=tip)
                     b.add_css_class("flat")
                     b.set_sensitive(0 <= i + delta < len(lst))
                     b.connect("clicked", self._move, i, delta)
                     row.add_suffix(b)
             rm = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER,
-                            tooltip_text="Remover")
+                            tooltip_text=_("Remover"))
             rm.add_css_class("flat")
             rm.connect("clicked", self._remove, i)
             row.add_suffix(rm)
@@ -81,12 +82,12 @@ class AppListEditor:
 
     def _add_row(self):
         self._avail = _installed_apps()
-        row = Adw.ComboRow(title=self.add_title, subtitle="Escolha na lista e clique em +")
+        row = Adw.ComboRow(title=self.add_title, subtitle=_("Escolha na lista e clique em +"))
         row.set_model(Gtk.StringList.new([a.get_display_name() for a in self._avail]))
         row.set_enable_search(True)
         row.set_expression(Gtk.PropertyExpression.new(Gtk.StringObject, None, "string"))
         btn = Gtk.Button(icon_name="list-add-symbolic", valign=Gtk.Align.CENTER,
-                         tooltip_text="Adicionar")
+                         tooltip_text=_("Adicionar"))
         btn.add_css_class("suggested-action")
         btn.connect("clicked", self._add, row)
         row.add_suffix(btn)
@@ -117,7 +118,7 @@ class AppListEditor:
 
 class SettingsWindow(Adw.PreferencesWindow):
     def __init__(self, app):
-        super().__init__(title="Ajustes do Dock")
+        super().__init__(title=_("Ajustes do Dock"))
         self.app = app
         self.set_default_size(560, 720)
         self.set_search_enabled(False)
@@ -147,8 +148,9 @@ class SettingsWindow(Adw.PreferencesWindow):
         page.add(self.trig_group)
         self.trig_editor = AppListEditor(
             self.trig_group, lambda: self.app.mode_entry()["triggers"], self._set_triggers,
-            reorder=False, add_title="Adicionar gatilho")
+            reorder=False, add_title=_("Adicionar gatilho"))
         page.add(self._reset_group())
+        translate_tree(self)
 
     @property
     def cfg(self):
@@ -217,13 +219,14 @@ class SettingsWindow(Adw.PreferencesWindow):
     def _new_mode(self, _b):
         names = {m["name"] for m in self.cfg["modes"]}
         n = 1
-        while f"Novo modo {n}" in names:
+        while f"{_('Novo modo ')}{n}" in names:
             n += 1
         cur = self.app.mode_entry()
-        self.cfg["modes"].append({"name": f"Novo modo {n}", "pinned": list(self.cfg["pinned"]),
+        new_name = f"{_('Novo modo ')}{n}"
+        self.cfg["modes"].append({"name": new_name, "pinned": list(self.cfg["pinned"]),
                                   "triggers": []})
         self.app.change(modes=self.cfg["modes"])
-        self.app.set_mode(f"Novo modo {n}")
+        self.app.set_mode(new_name)
 
     def _delete_mode(self, _b):
         modes = self.cfg["modes"]
@@ -241,18 +244,19 @@ class SettingsWindow(Adw.PreferencesWindow):
         self.app.change(modes=self.cfg["modes"])
 
     # ---------- recursos (com ilustração) ----------
-    def _feature(self, art, title, desc, key=None, soon=False, extra=()):
+    def _feature(self, art, title, desc, key=None, soon=False, extra=(), toggle=True):
         """Grupo com esboço do recurso, texto do que ele faz e a chave de liga/desliga."""
         g = Adw.PreferencesGroup(title=title, description=desc)
         g.add(_art_row(art))
-        if key:
-            row = _switch("Ativar", "", self.cfg[key], lambda v, k=key: self.app.change(**{k: v}))
-        else:
-            row = Adw.ActionRow(title="Ativar")
-        if soon:
-            row.set_subtitle("Em desenvolvimento")
-            row.set_sensitive(False)
-        g.add(row)
+        if toggle:
+            if key:
+                row = _switch("Ativar", "", self.cfg[key], lambda v, k=key: self.app.change(**{k: v}))
+            else:
+                row = Adw.ActionRow(title="Ativar")
+            if soon:
+                row.set_subtitle("Em desenvolvimento")
+                row.set_sensitive(False)
+            g.add(row)
         for r in extra:
             g.add(r)
         return g
@@ -266,7 +270,7 @@ class SettingsWindow(Adw.PreferencesWindow):
                           "O pontinho embaixo do ícone mostra quantas janelas o app tem (até 3) e "
                           "fica laranja e pulsando quando o app pede atenção.", key="rich_dots"),
             self._feature("reflexo", "Reflexo dos ícones",
-                          "Um reflexo suave embaixo de cada ícone, como no macOS clássico.",
+                          "Um reflexo suave embaixo de cada ícone, como no macOS clássico. Só nos docks de baixo e de cima.",
                           key="reflection"),
             self._feature("arrastar", "Arrastar arquivos para os ícones",
                           "Solte um arquivo sobre um app para abri-lo com ele, ou sobre a lixeira "
@@ -276,22 +280,50 @@ class SettingsWindow(Adw.PreferencesWindow):
                           "o app para o começo ou o fim do dock.", key="big_menu"),
             self._theme_feature(),
             self._feature("preview", "Pré-visualização de janelas",
-                          "Passar o mouse sobre um app aberto mostra miniaturas das janelas.",
-                          soon=True),
+                          "Passar o mouse sobre um app aberto mostra miniaturas das janelas. "
+                          "Sem permissão do KWin, mostra o ícone e o título.", key="window_preview"),
             self._feature("esconder", "Esconder inteligente",
-                          "O dock só recolhe quando uma janela estiver tapando.", soon=True),
-            self._feature("posicao", "Posição do dock",
-                          "Esquerda, direita ou topo, além de embaixo.", soon=True),
+                          "O dock só recolhe quando uma janela estiver tapando. Combine com "
+                          "\"Reservar espaço\" desligado.", key="smart_hide"),
+            self._position_feature(),
             self._feature("multimon", "Multi-monitor",
-                          "Um dock por monitor, com os apps de cada tela.", soon=True),
-            self._feature("traducoes", "Idioma", "Interface em inglês e espanhol.", soon=True),
+                          "Um dock por monitor, com os apps de cada tela.", key="multi_monitor"),
+            self._language_feature(),
             self._installer_feature(),
         ]
         return out
 
+    def _choice_row(self, title, options, current, on_pick):
+        """ComboRow simples: options = [(valor, texto)], on_pick(valor)."""
+        r = Adw.ComboRow(title=title)
+        r.set_model(Gtk.StringList.new([t for _v, t in options]))
+        vals = [v for v, _t in options]
+        r.set_selected(vals.index(current) if current in vals else 0)
+        r.connect("notify::selected", lambda row, _p: on_pick(vals[row.get_selected()]))
+        return r
+
+    def _position_feature(self):
+        opts = [("bottom", _("Embaixo")), ("top", _("Em cima")), ("left", _("Esquerda")),
+                ("right", _("Direita"))]
+        row = self._choice_row("Borda", opts, self.cfg["position"],
+                               lambda v: self.app.change(position=v))
+        return self._feature("posicao", "Posição do dock", "Em qual borda da tela o dock fica.",
+                             toggle=False, extra=(row,))
+
+    def _language_feature(self):
+        opts = [("auto", _("Automático (do sistema)"))] + [(k, LANG_NAMES[k]) for k in LANGS]
+
+        def pick(v):
+            if v != self.cfg["language"]:
+                self.app.change(language=v)
+                self.app.reopen_settings()
+        row = self._choice_row("Idioma", opts, self.cfg["language"], pick)
+        return self._feature("traducoes", "Idioma", "Idioma da interface do dock e dos ajustes.",
+                             toggle=False, extra=(row,))
+
     def _theme_feature(self):
         keys = list(THEMES)
-        names = [THEMES[k]["nome"] for k in keys]
+        names = [_(THEMES[k]["nome"]) for k in keys]
 
         def combo(title, sub, cfg_key):
             r = Adw.ComboRow(title=title, subtitle=sub)
@@ -332,7 +364,7 @@ class SettingsWindow(Adw.PreferencesWindow):
         g = Adw.PreferencesGroup(title="Aparência")
         keys = list(THEMES)
         combo = Adw.ComboRow(title="Tema", subtitle="Cores do fundo, borda e rótulo")
-        combo.set_model(Gtk.StringList.new([THEMES[k]["nome"] for k in keys]))
+        combo.set_model(Gtk.StringList.new([_(THEMES[k]["nome"]) for k in keys]))
         cur = self.cfg["theme"]
         combo.set_selected(keys.index(cur) if cur in keys else 0)
         combo.connect("notify::selected",
@@ -369,7 +401,7 @@ class SettingsWindow(Adw.PreferencesWindow):
     def _screen(self):
         g = Adw.PreferencesGroup(title="Tela")
         mons = Gdk.Display.get_default().get_monitors()
-        conns, labels = [""], ["Automático (o sistema escolhe)"]
+        conns, labels = [""], [_("Automático (o sistema escolhe)")]
         for i in range(mons.get_n_items()):
             m = mons.get_item(i)
             g_ = m.get_geometry()
@@ -435,19 +467,19 @@ class SettingsWindow(Adw.PreferencesWindow):
         pick = Gtk.Button(label="Escolher imagem…", valign=Gtk.Align.CENTER)
         pick.connect("clicked", self._pick_icon)
         reset = Gtk.Button(icon_name="edit-undo-symbolic", valign=Gtk.Align.CENTER,
-                           tooltip_text="Voltar para a fruta")
+                           tooltip_text=_("Voltar para a fruta"))
         reset.connect("clicked", lambda _b: self.app.change(launcher_icon=""))
         grid = Gtk.Button(label="Grade", valign=Gtk.Align.CENTER,
-                          tooltip_text="Usar o ícone de grade colorida")
+                          tooltip_text=_("Usar o ícone de grade colorida"))
         grid.connect("clicked", lambda _b: self.app.change(launcher_icon="grid"))
         for b in (grid, reset, pick):
             row.add_suffix(b)
         return row
 
     def _pick_icon(self, _b):
-        dlg = Gtk.FileDialog(title="Escolher ícone do menu iniciar")
+        dlg = Gtk.FileDialog(title=_("Escolher ícone do menu iniciar"))
         flt = Gtk.FileFilter()
-        flt.set_name("Imagens")
+        flt.set_name(_("Imagens"))
         flt.add_mime_type("image/png")
         flt.add_mime_type("image/svg+xml")
         flt.add_mime_type("image/webp")

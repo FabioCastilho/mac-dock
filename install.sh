@@ -5,6 +5,7 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DESKTOP="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/mac-dock.desktop"
+APPDESK="${XDG_DATA_HOME:-$HOME/.local/share}/applications/io.github.fabio.MacDock.desktop"
 DRY=0; UNINSTALL=0
 for a in "$@"; do
   case "$a" in
@@ -18,7 +19,7 @@ done
 run() { if [ "$DRY" = 1 ]; then echo "[simulação] $*"; else "$@"; fi; }
 
 if [ "$UNINSTALL" = 1 ]; then
-  run rm -f "$DESKTOP"
+  run rm -f "$DESKTOP" "$APPDESK"
   echo "Início automático removido. (Seus ajustes em ~/.config/mac-dock continuam lá.)"
   exit 0
 fi
@@ -56,5 +57,22 @@ Comment=Dock estilo macOS para o KDE Plasma
 Exec=/usr/bin/python3 $DIR/dock.py
 X-GNOME-Autostart-enabled=true
 DESK
+fi
+# Autoriza a captura de janelas (miniaturas): o KWin só atende apps que declaram isto no .desktop.
+run mkdir -p "$(dirname "$APPDESK")"
+if [ "$DRY" = 1 ]; then
+  echo "[simulação] escreveria $APPDESK (permissão de captura do KWin)"
+else
+  cat > "$APPDESK" <<DESK
+[Desktop Entry]
+Type=Application
+Name=mac-dock
+Comment=Dock estilo macOS para o KDE Plasma
+Exec=/usr/bin/python3 $DIR/dock.py
+NoDisplay=true
+StartupNotify=false
+X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2
+DESK
+  command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 --noincremental >/dev/null 2>&1 || true
 fi
 echo "Pronto. O dock inicia sozinho na próxima sessão. Para testar agora:  python3 $DIR/dock.py"

@@ -14,6 +14,10 @@ Dock estilo macOS para **KDE Plasma (Wayland)**, em Python + GTK4 + layer-shell.
 - Barra de progresso e contador no ícone, indicador de janelas (laranja quando o app pede atenção), reflexo opcional
 - Soltar arquivos num ícone para abrir no app (ou na lixeira); mais ações no menu do botão direito
 - Tema que segue o claro/escuro e a cor de destaque do KDE
+- Dock em qualquer borda (embaixo, em cima, esquerda ou direita) e, opcionalmente, um dock por monitor
+- Esconder inteligente: só recolhe quando uma janela cobre o dock
+- Miniaturas das janelas ao passar o mouse (via KWin; sem permissão mostra ícone e título)
+- Interface em português, inglês e espanhol
 - Janela de ajustes (libadwaita) com a página **Recursos**: cada recurso tem uma ilustração e uma chave de liga/desliga; configuração em `~/.config/mac-dock/config.json`
 
 ## Requisitos
@@ -29,7 +33,9 @@ python3 dock.py          # roda o dock (rodar de novo abre os ajustes)
 python3 dock.py --png X  # renderiza uma imagem de teste e sai
 ```
 
-Para instalar (confere as dependências e liga o início com a sessão): `./install.sh` (use `--dry-run` para só simular e `--uninstall` para remover).
+Para instalar (confere as dependências, liga o início com a sessão e autoriza as miniaturas no KWin): `./install.sh` (use `--dry-run` para só simular e `--uninstall` para remover).
+
+Testes: `python3 -m unittest discover -s tests`.
 
 O botão de menu usa `assets/launcher.png` se existir; sem ele, mostra uma grade. Use `launcher_icon` nos ajustes para escolher outra imagem.
 
