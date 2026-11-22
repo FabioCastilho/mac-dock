@@ -6,6 +6,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, Gtk  # noqa: E402
 
 from dock import DEFAULTS, THEMES, desktop_info  # noqa: E402
+from illustrations import make_area  # noqa: E402
 
 
 def _spin(row_title, subtitle, lo, hi, step, value, digits, on_change):
@@ -21,6 +22,15 @@ def _spin(row_title, subtitle, lo, hi, step, value, digits, on_change):
 def _switch(title, subtitle, active, on_change):
     row = Adw.SwitchRow(title=title, subtitle=subtitle, active=active)
     row.connect("notify::active", lambda r, _p: on_change(r.get_active()))
+    return row
+
+
+def _art_row(name):
+    """Linha só com o esboço do recurso (ocupa o topo do grupo)."""
+    row = Adw.PreferencesRow()
+    row.set_activatable(False)
+    row.set_focusable(False)
+    row.set_child(make_area(name))
     return row
 
 
@@ -111,7 +121,11 @@ class SettingsWindow(Adw.PreferencesWindow):
         self.app = app
         self.set_default_size(560, 720)
         self.set_search_enabled(False)
-        page = Adw.PreferencesPage()
+        feat = Adw.PreferencesPage(title="Recursos", icon_name="starred-symbolic")
+        self.add(feat)
+        for grp in self._features():
+            feat.add(grp)
+        page = Adw.PreferencesPage(title="Ajustes", icon_name="preferences-system-symbolic")
         self.add(page)
         page.add(self._appearance())
         page.add(self._screen())
@@ -225,6 +239,93 @@ class SettingsWindow(Adw.PreferencesWindow):
     def _set_triggers(self, lst):
         self.app.mode_entry()["triggers"] = list(lst)
         self.app.change(modes=self.cfg["modes"])
+
+    # ---------- recursos (com ilustração) ----------
+    def _feature(self, art, title, desc, key=None, soon=False, extra=()):
+        """Grupo com esboço do recurso, texto do que ele faz e a chave de liga/desliga."""
+        g = Adw.PreferencesGroup(title=title, description=desc)
+        g.add(_art_row(art))
+        if key:
+            row = _switch("Ativar", "", self.cfg[key], lambda v, k=key: self.app.change(**{k: v}))
+        else:
+            row = Adw.ActionRow(title="Ativar")
+        if soon:
+            row.set_subtitle("Em desenvolvimento")
+            row.set_sensitive(False)
+        g.add(row)
+        for r in extra:
+            g.add(r)
+        return g
+
+    def _features(self):
+        out = [
+            self._feature("progresso", "Progresso e contadores",
+                          "Downloads e tarefas de apps como o Brave e a Steam mostram uma barra no "
+                          "ícone, e o número de itens pendentes vira um contador.", key="progress"),
+            self._feature("indicador", "Indicador de janelas",
+                          "O pontinho embaixo do ícone mostra quantas janelas o app tem (até 3) e "
+                          "fica laranja e pulsando quando o app pede atenção.", key="rich_dots"),
+            self._feature("reflexo", "Reflexo dos ícones",
+                          "Um reflexo suave embaixo de cada ícone, como no macOS clássico.",
+                          key="reflection"),
+            self._feature("arrastar", "Arrastar arquivos para os ícones",
+                          "Solte um arquivo sobre um app para abri-lo com ele, ou sobre a lixeira "
+                          "para movê-lo para ela.", key="file_drop"),
+            self._feature("contexto", "Menu de contexto maior",
+                          "O botão direito ganha ações extras: minimizar todas as janelas e mover "
+                          "o app para o começo ou o fim do dock.", key="big_menu"),
+            self._theme_feature(),
+            self._feature("preview", "Pré-visualização de janelas",
+                          "Passar o mouse sobre um app aberto mostra miniaturas das janelas.",
+                          soon=True),
+            self._feature("esconder", "Esconder inteligente",
+                          "O dock só recolhe quando uma janela estiver tapando.", soon=True),
+            self._feature("posicao", "Posição do dock",
+                          "Esquerda, direita ou topo, além de embaixo.", soon=True),
+            self._feature("multimon", "Multi-monitor",
+                          "Um dock por monitor, com os apps de cada tela.", soon=True),
+            self._feature("traducoes", "Idioma", "Interface em inglês e espanhol.", soon=True),
+            self._installer_feature(),
+        ]
+        return out
+
+    def _theme_feature(self):
+        keys = list(THEMES)
+        names = [THEMES[k]["nome"] for k in keys]
+
+        def combo(title, sub, cfg_key):
+            r = Adw.ComboRow(title=title, subtitle=sub)
+            r.set_model(Gtk.StringList.new(names))
+            cur = self.cfg[cfg_key]
+            r.set_selected(keys.index(cur) if cur in keys else 0)
+            r.connect("notify::selected",
+                      lambda row, _p: self.app.change(**{cfg_key: keys[row.get_selected()]}))
+            return r
+
+        follow = _switch("Seguir o claro/escuro do KDE", "Troca entre os dois temas abaixo sozinho",
+                         self.cfg["theme_follow"] == "kde",
+                         lambda v: self.app.change(theme_follow="kde" if v else "off"))
+        accent = _switch("Usar a cor de destaque do KDE", "Pinta o indicador e a borda com ela",
+                         self.cfg["accent_auto"], lambda v: self.app.change(accent_auto=v))
+        return self._feature(
+            "temas", "Temas e cor automática",
+            "Mais temas prontos e a opção de acompanhar o modo claro/escuro e a cor de destaque "
+            "do KDE.", extra=(follow, combo("Tema no modo claro", "Usado quando o KDE está claro",
+                                            "theme_light"),
+                              combo("Tema no modo escuro", "Usado quando o KDE está escuro",
+                                    "theme_dark"), accent))
+
+    def _installer_feature(self):
+        copy = Gtk.Button(label="Copiar comando", valign=Gtk.Align.CENTER)
+        row = Adw.ActionRow(title="Instalar no sistema",
+                            subtitle="Na pasta do projeto, rode ./install.sh: ele confere as "
+                                     "dependências e liga o início automático com a sessão.")
+        row.add_suffix(copy)
+        copy.connect("clicked", lambda _b: self.get_clipboard().set("./install.sh"))
+        g = Adw.PreferencesGroup(title="Instalador")
+        g.add(_art_row("instalador"))
+        g.add(row)
+        return g
 
     # ---------- grupos ----------
     def _appearance(self):

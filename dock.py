@@ -103,6 +103,15 @@ DEFAULTS = {
     "auto_modes": True,    # troca de modo sozinha quando um app "gatilho" fica ativo
     "badges": True,        # contador de notificações no ícone do app
     "music_pulse": True,   # ícone do app que está tocando música anima
+    "reflection": False,   # reflexo suave embaixo dos ícones
+    "rich_dots": True,     # indicador mostra nº de janelas e pede atenção em laranja
+    "big_menu": True,      # mais ações no menu do botão direito
+    "file_drop": True,     # soltar arquivos num ícone abre no app; na lixeira, apaga
+    "progress": True,      # barra de progresso e contador no ícone (Unity LauncherEntry)
+    "theme_follow": "off", # "kde": segue o claro/escuro do KDE usando theme_light/theme_dark
+    "theme_light": "claro",
+    "theme_dark": "escuro",
+    "accent_auto": False,  # usa a cor de destaque do KDE no indicador e na borda
 }
 
 # modos sugeridos na primeira execução (só entram os apps instalados)
@@ -148,6 +157,15 @@ THEMES = {
     "escuro": {"nome": "Escuro", "bg": (0.10, 0.10, 0.12, 0.55), "border": (1, 1, 1, 0.22),
                "label_bg": (0.10, 0.10, 0.12, 0.80), "label_fg": (1, 1, 1, 0.95),
                "dot": (1, 1, 1, 0.85)},
+    "oceano": {"nome": "Oceano", "bg": (0.04, 0.14, 0.24, 0.62), "border": (0.55, 0.85, 1.0, 0.35),
+               "label_bg": (0.04, 0.14, 0.24, 0.90), "label_fg": (0.9, 0.97, 1, 0.97),
+               "dot": (0.55, 0.9, 1, 0.95)},
+    "floresta": {"nome": "Floresta", "bg": (0.07, 0.15, 0.11, 0.62), "border": (0.6, 0.95, 0.7, 0.30),
+                 "label_bg": (0.07, 0.15, 0.11, 0.90), "label_fg": (0.92, 1, 0.94, 0.97),
+                 "dot": (0.6, 0.95, 0.7, 0.95)},
+    "sakura": {"nome": "Sakura", "bg": (0.97, 0.88, 0.92, 0.50), "border": (1, 1, 1, 0.70),
+               "label_bg": (0.35, 0.14, 0.24, 0.90), "label_fg": (1, 0.94, 0.97, 0.97),
+               "dot": (0.85, 0.3, 0.5, 0.95)},
     "claro": {"nome": "Claro", "bg": (1, 1, 1, 0.45), "border": (1, 1, 1, 0.70),
               "label_bg": (1, 1, 1, 0.88), "label_fg": (0.1, 0.1, 0.12, 0.95),
               "dot": (0.1, 0.1, 0.12, 0.75)},
@@ -267,13 +285,14 @@ function snap() {
     if (!w.normalWindow || w.skipTaskbar) continue;
     out.push({id: String(w.internalId), app: String(w.desktopFileName || ""),
               cls: String(w.resourceClass || ""), title: String(w.caption || ""),
-              active: w === workspace.activeWindow, min: !!w.minimized, pid: w.pid});
+              active: w === workspace.activeWindow, min: !!w.minimized, pid: w.pid, att: !!w.demandsAttention});
   }
   callDBus(SVC, PATH, IFACE, "Update", JSON.stringify(out));
 }
 function hook(w) {
   if (w.captionChanged) w.captionChanged.connect(snap);
   if (w.minimizedChanged) w.minimizedChanged.connect(snap);
+  if (w.demandsAttentionChanged) w.demandsAttentionChanged.connect(snap);
 }
 for (const w of workspace.windowList()) hook(w);
 workspace.windowAdded.connect(function(w) { hook(w); snap(); });
@@ -341,6 +360,8 @@ class Item:
         self.proc_running = False
         self.bounce_start = None
         self.badge = 0
+        self.progress = None         # 0..1 (Unity LauncherEntry) ou None
+        self.count = 0
         self.music = False           # está tocando mídia (MPRIS)
         self.pulse = 0.0
         self.scale = 1.0             # ampliação atual (mola)
@@ -357,6 +378,10 @@ class Item:
     @property
     def active(self):
         return any(w.get("active") for w in self.windows)
+
+    @property
+    def attention(self):
+        return any(w.get("att") for w in self.windows)
 
     @property
     def desktop_id(self):
@@ -468,6 +493,10 @@ class DockView(Gtk.Widget):
         self._sync_key = None
         self.pending = []            # uma entrada (conjunto de nomes) por notificação não lida
         self.playing_keys = frozenset()
+        self.entries = {}            # key do app -> {'progress', 'count'} (Unity LauncherEntry)
+        self.kde_dark = None         # preferência de cor do KDE (True = escuro)
+        self.kde_accent = None
+        self.drop_hover = False
         self._last_region = None
         self._last_frame = None
         self.on_settings = self.on_launcher = self.on_pinned = None
@@ -498,6 +527,11 @@ class DockView(Gtk.Widget):
         right.set_button(3)
         right.connect("pressed", self._on_right)
         self.add_controller(right)
+        drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+        drop.connect("motion", self._drop_motion)
+        drop.connect("leave", self._drop_leave)
+        drop.connect("drop", self._drop_files)
+        self.add_controller(drop)
 
         self.add_tick_callback(self._tick)
         GLib.timeout_add(1500, self._poll_running)
@@ -603,6 +637,30 @@ class DockView(Gtk.Widget):
                 self.pending = [p for p in self.pending if p not in mine]
                 mine = []
             it.badge = min(len(mine), 99) if on else 0
+            it.progress, it.count = None, 0
+            if self.cfg["progress"]:
+                for key, st in self.entries.items():
+                    if keys_match({key}, it):
+                        it.progress, it.count = st.get("progress"), st.get("count", 0)
+                        break
+                it.badge = max(it.badge, min(it.count, 99))
+
+    def set_entry(self, key, props):
+        """Atualização do protocolo com.canonical.Unity.LauncherEntry (progresso e contador)."""
+        st = {}
+        if props.get("progress-visible") and isinstance(props.get("progress"), (int, float)):
+            st["progress"] = max(0.0, min(1.0, float(props["progress"])))
+        if props.get("count-visible") and isinstance(props.get("count"), int):
+            st["count"] = max(0, props["count"])
+        if st:
+            self.entries[key] = st
+        else:
+            self.entries.pop(key, None)
+        self.apply_badges()
+
+    def set_kde(self, dark, accent):
+        self.kde_dark, self.kde_accent = dark, accent
+        self.queue_draw()
 
     def set_playing(self, keys):
         self.playing_keys = keys
@@ -641,7 +699,14 @@ class DockView(Gtk.Widget):
                 it.scale, it.vel = 0.3, 0.0
 
     def theme(self):
-        return THEMES.get(self.cfg["theme"], THEMES["escuro"])
+        c = self.cfg
+        name = c["theme"]
+        if c["theme_follow"] == "kde" and self.kde_dark is not None:
+            name = c["theme_dark"] if self.kde_dark else c["theme_light"]
+        th = THEMES.get(name, THEMES["escuro"])
+        if c["accent_auto"] and self.kde_accent:
+            th = dict(th, dot=(*self.kde_accent, 0.95), border=(*self.kde_accent, 0.38))
+        return th
 
     def _load_icons(self):
         theme = Gtk.IconTheme.get_for_display(self.get_display())
@@ -872,6 +937,47 @@ class DockView(Gtk.Widget):
                 it.bounce_start = None
         return True
 
+    # ---------- soltar arquivos ----------
+    def _drop_target(self, x):
+        i = self._hit(x)
+        it = self.items[i] if i >= 0 else None
+        if it and ((it.kind == "app" and it.info) or it.kind == "trash"):
+            return it
+        return None
+
+    def _drop_motion(self, _t, x, _y):
+        if not self.cfg["file_drop"]:
+            return 0
+        self.mouse_x = x
+        self.drop_hover = True
+        return Gdk.DragAction.COPY if self._drop_target(x) else 0
+
+    def _drop_leave(self, _t):
+        self.drop_hover = False
+        self.mouse_x = None
+
+    def _drop_files(self, _t, value, x, _y):
+        self.drop_hover = False
+        it = self._drop_target(x)
+        files = value.get_files() if value else []
+        if not (self.cfg["file_drop"] and it and files):
+            return False
+        if it.kind == "trash":
+            for f in files:
+                try:
+                    f.trash(None)
+                except GLib.Error as e:
+                    print("lixeira:", e.message, file=sys.stderr)
+            self._poll_trash()
+        else:
+            try:
+                it.info.launch(files, None)
+                if not it.running:
+                    it.bounce_start = time.monotonic()
+            except GLib.Error as e:
+                print("abrir arquivo:", e.message, file=sys.stderr)
+        return True
+
     # ---------- menu do botão direito ----------
     def _on_right(self, _g, _n, x, _y):
         i = self._hit(x)
@@ -906,7 +1012,15 @@ class DockView(Gtk.Widget):
                 add(csec, "Fechar todas as janelas",
                     lambda: [kwin_window_cmd(w["id"], "close") for w in it.windows])
                 menu.append_section(None, csec)
+            if self.cfg["big_menu"] and it.windows:
+                msec = Gio.Menu()
+                add(msec, "Minimizar todas as janelas",
+                    lambda: [kwin_window_cmd(w["id"], "minimize") for w in it.windows])
+                menu.append_section(None, msec)
             psec = Gio.Menu()
+            if self.cfg["big_menu"] and it.pinned and len(self.cfg["pinned"]) > 1:
+                add(psec, "Mover para o começo", lambda: self._move_pinned(it, 0))
+                add(psec, "Mover para o fim", lambda: self._move_pinned(it, -1))
             if it.pinned:
                 add(psec, "Remover do dock", lambda: self._unpin(it))
             elif it.info:
@@ -947,6 +1061,12 @@ class DockView(Gtk.Widget):
     def _pin(self, it):
         if self.on_pinned and it.desktop_id:
             self.on_pinned(list(self.cfg["pinned"]) + [it.desktop_id])
+
+    def _move_pinned(self, it, where):
+        lst = [d for d in self.cfg["pinned"] if d != it.desktop_id]
+        lst.insert(0 if where == 0 else len(lst), it.desktop_id)
+        if self.on_pinned:
+            self.on_pinned(lst)
 
     def _unpin(self, it):
         if self.on_pinned:
@@ -1113,12 +1233,12 @@ class DockView(Gtk.Widget):
                 it.paintable.snapshot(snapshot, size, size)
                 snapshot.restore()
             snapshot.pop()
+            if c["reflection"] and it.paintable and it is not dragged:
+                self._draw_reflection(snapshot, it, x, base_y, size, pad + mb)
             if it.running and c["show_dots"] and it.kind == "app" and it is not dragged:
-                d = 6 if it.active else 5
-                col = rgba(*th["dot"])
-                if c["glow"] and it.color:
-                    col = rgba(*it.color, 0.95)
-                snapshot.append_color(col, rect(x + size / 2 - d / 2, H - mb - 8, d, d))
+                self._draw_dots(snapshot, it, x, size, H - mb - 8, th, now)
+            if it.progress is not None and it is not dragged:
+                self._draw_progress(snapshot, x, y, size, it.progress)
             if it.music and it is not dragged:
                 self._draw_equalizer(snapshot, x, y, size, now)
             if it.badge:
@@ -1131,6 +1251,52 @@ class DockView(Gtk.Widget):
             if it.kind != "sep":
                 self._draw_label(snapshot, it.x + it.w / 2, base_y - it.w - 14, it.name, th)
         snapshot.restore()
+
+    def _draw_dots(self, snapshot, it, x, size, y, th, now):
+        c = self.cfg
+        d = 6 if it.active else 5
+        col = rgba(*th["dot"])
+        if c["glow"] and it.color:
+            col = rgba(*it.color, 0.95)
+        n = 1
+        if c["rich_dots"]:
+            n = max(1, min(len(it.windows), 3))
+            if it.attention:
+                col = rgba(1.0, 0.62, 0.12, 0.55 + 0.45 * abs(math.sin(now * 4)))
+        step = d + 3
+        x0 = x + size / 2 - (n * d + (n - 1) * 3) / 2
+        for k in range(n):
+            snapshot.append_color(col, rect(x0 + k * step, y, d, d))
+
+    def _draw_progress(self, snapshot, x, y, size, frac):
+        w, h = size * 0.76, max(4.0, size * 0.09)
+        bx, by = x + size * 0.12, y + size * 0.80
+        rr = Gsk.RoundedRect()
+        rr.init_from_rect(rect(bx, by, w, h), h / 2)
+        snapshot.push_rounded_clip(rr)
+        snapshot.append_color(rgba(0, 0, 0, 0.60), rect(bx, by, w, h))
+        snapshot.append_color(rgba(0.35, 0.65, 1.0, 1), rect(bx, by, w * frac, h))
+        snapshot.pop()
+
+    def _draw_reflection(self, snapshot, it, x, base_y, size, room):
+        rh = min(size * 0.40, room)
+        if rh < 4:
+            return
+        area = rect(x, base_y + 1, size, rh)
+        snapshot.push_clip(area)
+        snapshot.push_mask(Gsk.MaskMode.ALPHA)
+        snapshot.append_linear_gradient(
+            area, Graphene.Point().init(x, base_y), Graphene.Point().init(x, base_y + rh),
+            [stop(0.0, rgba(1, 1, 1, 0.30)), stop(1.0, rgba(1, 1, 1, 0.0))])
+        snapshot.pop()
+        snapshot.save()
+        snapshot.translate(Graphene.Point().init(x, base_y + 1))
+        snapshot.scale(1, -1)
+        snapshot.translate(Graphene.Point().init(0, -size))
+        it.paintable.snapshot(snapshot, size, size)
+        snapshot.restore()
+        snapshot.pop()   # máscara
+        snapshot.pop()   # clip
 
     def _draw_glow(self, snapshot, it, x, base_y, size):
         c = self.cfg
@@ -1277,7 +1443,7 @@ class DockApp(Adw.Application):
         self.cfg = load_config()
         self.win = self.view = self.settings_win = self.launcher_win = None
         self.feed = None
-        self.notify_watcher = self.mpris = None
+        self.notify_watcher = self.mpris = self.entries = self.appearance = None
         self._save_id = 0
         self._auto_from = None       # modo anterior, quando a troca foi automática
         self._trig_keys = {}
@@ -1307,6 +1473,11 @@ class DockApp(Adw.Application):
         self.notify_watcher = NotifyWatcher(
             lambda app, entry, rid: self.view and self.view.notify(app, entry, rid))
         self.mpris = MprisWatcher(lambda keys: self.view and self.view.set_playing(keys))
+        from watchers import AppearanceWatcher, LauncherEntryWatcher
+        self.entries = LauncherEntryWatcher(
+            lambda key, props: self.view and self.view.set_entry(key, props))
+        self.appearance = AppearanceWatcher(
+            lambda dark, accent: self.view and self.view.set_kde(dark, accent))
 
     def _on_windows(self, wins):
         DockApp.windows = wins

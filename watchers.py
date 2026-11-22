@@ -113,3 +113,77 @@ class MprisWatcher:
         if keys != self._last:
             self._last = keys
             self.on_change(keys)
+
+
+class LauncherEntryWatcher:
+    """Progresso e contador que apps (Brave, Firefox, Steam…) publicam em
+    com.canonical.Unity.LauncherEntry. Chama on_update(chave_do_app, propriedades)."""
+
+    def __init__(self, on_update):
+        self.on_update = on_update
+        try:
+            conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            self._id = conn.signal_subscribe(None, "com.canonical.Unity.LauncherEntry", "Update",
+                                             None, None, Gio.DBusSignalFlags.NONE, self._signal)
+        except GLib.Error as e:
+            print(f"[mac-dock] sem LauncherEntry: {e.message}")
+
+    def _signal(self, _conn, _sender, _path, _iface, _name, params, *_rest):
+        try:
+            uri, props = params.unpack()
+        except (ValueError, TypeError):
+            return
+        key = str(uri).removeprefix("application://").removesuffix(".desktop").lower()
+        if key:
+            self.on_update(key, props if isinstance(props, dict) else {})
+
+
+class AppearanceWatcher:
+    """Lê do portal do desktop se o KDE está no modo escuro e qual a cor de destaque.
+    Chama on_change(escuro: bool|None, destaque: (r, g, b)|None)."""
+
+    def __init__(self, on_change):
+        self.on_change = on_change
+        self._dark = self._accent = None
+        self._last = None
+        try:
+            self.conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        except GLib.Error:
+            self.conn = None
+            return
+        GLib.timeout_add_seconds(4, self._poll)
+        self._poll()
+
+    def _read(self, key, cb):
+        self.conn.call("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+                       "org.freedesktop.portal.Settings", "ReadOne",
+                       GLib.Variant("(ss)", ("org.freedesktop.appearance", key)),
+                       GLib.VariantType("(v)"), Gio.DBusCallFlags.NONE, 1500, None, cb)
+
+    def _poll(self):
+        self._read("color-scheme", self._scheme)
+        self._read("accent-color", self._accent_cb)
+        return True
+
+    def _scheme(self, conn, res):
+        try:
+            v = conn.call_finish(res).unpack()[0]
+        except GLib.Error:
+            return
+        self._dark = {1: True, 2: False}.get(v)
+        self._emit()
+
+    def _accent_cb(self, conn, res):
+        try:
+            v = conn.call_finish(res).unpack()[0]
+        except GLib.Error:
+            return
+        ok = isinstance(v, tuple) and len(v) == 3 and all(0.0 <= float(c) <= 1.0 for c in v)
+        self._accent = tuple(float(c) for c in v) if ok else None
+        self._emit()
+
+    def _emit(self):
+        cur = (self._dark, self._accent)
+        if cur != self._last:
+            self._last = cur
+            self.on_change(*cur)
