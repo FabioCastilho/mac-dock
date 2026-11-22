@@ -2,9 +2,9 @@
 
 Dock estilo macOS para **KDE Plasma (Wayland)**, em Python + GTK4 + layer-shell.
 
-![mac-dock: ampliação com mola e bounce ao abrir um app](assets/demo.gif)
+![mac-dock: ampliação com mola, bounce, barra de progresso, contador, pontos de janelas e reflexo](assets/demo.gif)
 
-<sub>Demonstração renderizada pelo próprio dock sobre um fundo de exemplo; no KDE de verdade o vidro desfoca o que está atrás.</sub>
+<sub>Mostra a ampliação com mola, o bounce ao abrir, a barra de progresso e o contador (Dolphin), os pontos de janelas, o ponto laranja de atenção (Steam) e o reflexo. Renderizada pelo próprio dock sobre um fundo de exemplo; no KDE de verdade o vidro desfoca o que está atrás.</sub>
 
 - Ampliação dos ícones com física de mola e bounce ao abrir apps
 - Apps abertos detectados via script do KWin, com indicador
