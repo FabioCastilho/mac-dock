@@ -13,7 +13,8 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+gi.require_version("Graphene", "1.0")
+from gi.repository import Gdk, Gio, GLib, Graphene, Gtk  # noqa: E402
 
 DEST = "org.kde.KWin"
 PATH = "/org/kde/KWin/ScreenShot2"
@@ -80,6 +81,38 @@ def to_texture(shot):
     return Gdk.MemoryTexture.new(width, height, QIMAGE_FORMATS[fmt], GLib.Bytes.new(data), stride)
 
 
+class Thumb(Gtk.Widget):
+    """Quadro de tamanho fixo que desenha a miniatura (ou o ícone) ajustada, sem esticar o popover."""
+    __gtype_name__ = "MacDockThumb"
+
+    def __init__(self):
+        super().__init__()
+        self.paintable = None
+        self.is_icon = True
+
+    def set_paintable(self, paintable, is_icon=False):
+        self.paintable, self.is_icon = paintable, is_icon
+        self.queue_draw()
+
+    def do_measure(self, orientation, _for_size):
+        n = THUMB_W if orientation == Gtk.Orientation.HORIZONTAL else THUMB_H
+        return n, n, -1, -1
+
+    def do_snapshot(self, snapshot):
+        p = self.paintable
+        if p is None:
+            return
+        pw, ph = p.get_intrinsic_width() or 128, p.get_intrinsic_height() or 128
+        k = min(THUMB_W / pw, THUMB_H / ph)
+        if self.is_icon:
+            k = min(k, 72.0 / max(pw, ph))        # ícone de app: pequeno, centrado
+        w, h = pw * k, ph * k
+        snapshot.save()
+        snapshot.translate(Graphene.Point().init((THUMB_W - w) / 2, (THUMB_H - h) / 2))
+        p.snapshot(snapshot, w, h)
+        snapshot.restore()
+
+
 class WindowPreview:
     """Popover com um cartão (miniatura + título) por janela do app."""
 
@@ -129,12 +162,9 @@ class WindowPreview:
         pop.popup()
 
     def _card(self, item, win):
-        pic = Gtk.Picture()
-        pic.set_size_request(THUMB_W, THUMB_H)
-        pic.set_content_fit(Gtk.ContentFit.CONTAIN)
-        pic.set_can_shrink(True)
+        pic = Thumb()
         if item.paintable is not None:
-            pic.set_paintable(item.paintable)
+            pic.set_paintable(item.paintable, is_icon=True)
         title = Gtk.Label(label=(win.get("title") or item.name)[:60])
         title.set_ellipsize(3)           # fim do texto
         title.set_max_width_chars(24)
@@ -166,7 +196,7 @@ class WindowPreview:
     def _show(self, pic, shot):
         self._failed = 0
         try:
-            pic.set_paintable(to_texture(shot))
+            pic.set_paintable(to_texture(shot), is_icon=False)
         except (GLib.Error, TypeError):
             pass
         return False
