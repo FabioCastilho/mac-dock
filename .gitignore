@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+*.tmp
+*.bak
+.venv/
+config.json
+.env
+# imagem pessoal do botão de menu (use a sua em assets/launcher.png; sem ela o dock usa a grade)
+assets/launcher.png
