@@ -27,9 +27,18 @@ Dock estilo macOS para **KDE Plasma (Wayland)**, em Python + GTK4 + layer-shell.
 | Posição | Embaixo, em cima, esquerda ou direita |
 | Multi-monitor | Um dock por monitor, com os apps de cada tela |
 | Temas e cor automática | Segue o claro/escuro e a cor de destaque do KDE |
+| Modos | Conjuntos de apps (Jogos, Dev…) com troca manual ou automática |
 | Idioma | Português, inglês e espanhol |
 
 ![O dock em qualquer borda da tela](assets/posicoes.png)
+
+### Modos (Jogos, Dev, Criação…)
+
+Um **modo** é um conjunto de apps fixos no dock. Na primeira execução o dock cria o modo **Padrão** (os apps que você já tinha) e sugere **Jogos**, **Dev** e **Criação**, só com os apps que estão instalados (Steam, Lutris e Discord; Konsole, VS Code e Kate; Krita, Blender e GIMP, por exemplo).
+
+- **Trocar na mão:** botão direito em qualquer lugar do dock, **Modo: …**.
+- **Troca automática:** cada modo pode ter *gatilhos*, que são apps. Abriu a Steam, o dock vira o modo Jogos sozinho; fechou, ele volta ao modo anterior. Dá para ligar e desligar isso em **Ajustes > Modos**.
+- **Editar:** em **Ajustes > Modos** você cria um modo novo (ele copia o atual), renomeia, exclui, escolhe quais apps ficam fixos, a ordem deles e os gatilhos.
 
 ### Ajustes
 
