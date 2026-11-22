@@ -1236,8 +1236,9 @@ class DockView(Gtk.Widget):
         add(ssec, _("Ajustes do dock…"), lambda: self.on_settings and self.on_settings())
         menu.append_section(None, ssec)
 
-        pop = Gtk.PopoverMenu.new_from_model(menu)
+        from menus import popover_from_model
         self.insert_action_group("dock", group)
+        pop = popover_from_model(menu, group, lambda: None)
         pop.set_parent(self)
         pop.set_position({"bottom": Gtk.PositionType.TOP, "top": Gtk.PositionType.BOTTOM,
                           "left": Gtk.PositionType.RIGHT, "right": Gtk.PositionType.LEFT}[self.position])
