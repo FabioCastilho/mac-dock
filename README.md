@@ -8,17 +8,36 @@ Dock estilo macOS para **KDE Plasma (Wayland)**, em Python + GTK4 + layer-shell.
 
 - Ampliação dos ícones com física de mola e bounce ao abrir apps
 - Apps abertos detectados via script do KWin, com indicador
-- Menu do botão direito (ações do app, janelas, fixar/remover), arrastar para reordenar, lixeira
-- Esconder automático, vidro com blur do KWin, temas Escuro, Claro, Vidro (estilo Apple), Grafite e Meia-noite
+- Menu do botão direito (ações do app, janelas, fixar/remover, minimizar todas, mover), arrastar para reordenar, lixeira
+- Esconder automático, vidro com blur do KWin, temas Escuro, Claro, Vidro (estilo Apple), Grafite, Meia-noite, Oceano, Floresta e Sakura
 - Lançador de apps em tela cheia (estilo Launchpad)
-- Barra de progresso e contador no ícone, indicador de janelas (laranja quando o app pede atenção), reflexo opcional
-- Soltar arquivos num ícone para abrir no app (ou na lixeira); mais ações no menu do botão direito
-- Tema que segue o claro/escuro e a cor de destaque do KDE
-- Dock em qualquer borda (embaixo, em cima, esquerda ou direita) e, opcionalmente, um dock por monitor
-- Esconder inteligente: só recolhe quando uma janela cobre o dock
-- Miniaturas das janelas ao passar o mouse (via KWin; sem permissão mostra ícone e título)
-- Interface em português, inglês e espanhol
-- Janela de ajustes (libadwaita) com a página **Recursos**: cada recurso tem uma ilustração e uma chave de liga/desliga; configuração em `~/.config/mac-dock/config.json`
+
+### Recursos
+
+![Barra de progresso, contador, pontos de janelas e reflexo](assets/recursos.png)
+
+| Recurso | O que faz |
+|---|---|
+| Progresso e contadores | Barra no ícone e número de pendências (apps que usam `com.canonical.Unity.LauncherEntry`, como Brave e Steam) |
+| Indicador de janelas | Até 3 pontos conforme o número de janelas; laranja e pulsando quando o app pede atenção |
+| Reflexo dos ícones | Reflexo suave dentro do contorno do dock (docks de baixo e de cima) |
+| Arrastar arquivos | Soltar um arquivo num app abre com ele; na lixeira, move para ela |
+| Pré-visualização de janelas | Miniaturas ao passar o mouse (via KWin; sem permissão mostra ícone e título) |
+| Esconder inteligente | O dock só recolhe quando uma janela o cobre |
+| Posição | Embaixo, em cima, esquerda ou direita |
+| Multi-monitor | Um dock por monitor, com os apps de cada tela |
+| Temas e cor automática | Segue o claro/escuro e a cor de destaque do KDE |
+| Idioma | Português, inglês e espanhol |
+
+![O dock em qualquer borda da tela](assets/posicoes.png)
+
+### Ajustes
+
+A janela de ajustes tem a página **Recursos**: cada recurso vem com uma ilustração do que ele faz e uma chave de liga/desliga. A página **Ajustes** traz o resto (aparência, tela, ícones e modos).
+
+![Página Recursos dos ajustes](assets/ajustes.png)
+
+Configuração em `~/.config/mac-dock/config.json`.
 
 ## Requisitos
 
